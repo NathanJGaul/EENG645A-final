@@ -1,0 +1,28 @@
+version: '3.7'
+services:
+  final:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: develop
+    environment:
+      DISPLAY:
+      TF_FORCE_GPU_ALLOW_GROWTH: 'true'
+    image: final:gaul
+    # set user to your user id which is usually 1000:1000 to check you user id run `echo $(id -u):$(id -g)`
+    user: 1001:1001
+    volumes:
+      # passing through this file allows opening windows from the container in your host computer
+      - "/tmp/.X11-unix:/tmp/.X11-unix:rw"
+      # pass the passwd file so it can know who user 1000 is
+      - "/etc/passwd:/etc/passwd"
+      # pass through data folder
+      - "/opt/data:/opt/data"
+      # pass through the .keras folder
+      - "/opt/data/.keras:/tmp/.keras"
+      # mount our project
+      - ".:/opt/project"
+    working_dir: /opt/project
+    command:
+      - python3
+      - src/final.py
