@@ -13,3 +13,6 @@ Pillow
 opencv-python
 
 tqdm
+
+segmentation-models==1.0.*
+albumentations
