@@ -131,14 +131,24 @@ def make_mask(row_id, df):
     return fname, masks
 
 # https://www.kaggle.com/go1dfish/clear-mask-visualization-and-simple-eda
-def show_mask(img, mask, palette):
-    fig, ax = plt.subplots(figsize=(15, 15))
+def show_mask(**images):
+    # color pallet for defect classifications
+    palette= [(249, 192, 12), (0, 185, 241), (114, 0, 218), (249, 50, 12)]
 
-    for ch in range(4):
-        contours, _ = cv2.findContours(mask[:, :, ch], cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-        for i in range(0, len(contours)):
-            cv2.polylines(img, contours[i], True, palette[ch], 2)
-    ax.imshow(img)
+    n = len(images)
+    plt.figure(figsize=(16, 5))
+    plt.tight_layout()
+
+    for i, (name, (image, mask)) in enumerate(images.items()):
+        for ch in range(4):
+            contours, _ = cv2.findContours(mask[:, :, ch], cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+            for j in range(0, len(contours)):
+                cv2.polylines(image, contours[j], True, palette[ch], 2)
+        plt.subplot(n, 1, i + 1)
+        plt.xticks([])
+        plt.yticks([])
+        plt.title(' '.join(name.split('_')).title())
+        plt.imshow(image)
     plt.show()
 
 # https://github.com/qubvel/segmentation_models/blob/master/examples/multiclass%20segmentation%20(camvid).ipynb
@@ -154,6 +164,15 @@ def visualize(**images):
         plt.title(' '.join(name.split('_')).title())
         plt.imshow(image)
     plt.show()
+
+# helper function for data visualization
+def denormalize(x):
+    """Scale image to range 0..1 for correct plot"""
+    x_max = np.percentile(x, 98)
+    x_min = np.percentile(x, 2)
+    x = (x - x_min) / (x_max - x_min)
+    x = x.clip(0, 1)
+    return x
 
 # class for managing the dataset
 # used example https://github.com/qubvel/segmentation_models/blob/master/examples/multiclass%20segmentation%20(camvid).ipynb
@@ -233,25 +252,30 @@ class Dataloader(keras.utils.Sequence):
         if self.shuffle:
             self.indexes = np.random.permutation(self.indexes)
 
-def get_training_augmentation(resize_size):
-    train_transform = [
-        A.Resize(height=resize_size[0], width=resize_size[1], always_apply=True, p=1),
+def get_training_augmentation(resize_shape=None, interpolation=cv2.INTER_LINEAR):
+    transform = [
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
     ]
-    return A.Compose(train_transform)
+    if resize_shape is not None:
+        transform.append(
+            A.Resize(height=resize_shape[0], width=resize_shape[1], interpolation=interpolation, always_apply=True, p=1),
+        )
+    return A.Compose(transform)
 
-def get_validation_augmentation(resize_size):
-    train_transform = [
-        A.Resize(height=resize_size[0], width=resize_size[1], always_apply=True, p=1),
-    ]
-    return A.Compose(train_transform)
+def get_validation_augmentation(resize_shape=None,):
+    if resize_shape is not None:
+        transform = [
+            A.Resize(height=resize_shape[0], width=resize_shape[1], always_apply=True, p=1),
+        ]
+    return A.Compose(transform)
 
-def get_testing_augmentation(resize_size):
-    train_transform = [
-        A.Resize(height=resize_size[0], width=resize_size[1], always_apply=True, p=1),
-    ]
-    return A.Compose(train_transform)
+def get_testing_augmentation(resize_shape=None):
+    if resize_shape is not None:
+        transform = [
+            A.Resize(height=resize_shape[0], width=resize_shape[1], always_apply=True, p=1),
+        ]
+    return A.Compose(transform)
 
 def get_preprocessing(preprocessing_fn):
     _transform = [
@@ -330,39 +354,55 @@ def main():
     log_dir = os.path.join("./logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
     images_dir = os.path.join(file_root, "train_images")
 
-    # color pallet for defect classification
-    palette= [(249, 192, 12), (0, 185, 241), (114, 0, 218), (249, 50, 12)]
-
     # load in damage labels
     df_path = os.path.join(file_root, "train.csv")
     train_df, val_df, test_df = load_dataframe_split(df_path)
 
-    # test the dataset
-    train_dataset = Dataset(dataframe=train_df, images_dir=images_dir)
-    image, mask = train_dataset[5]
-    #show_mask(image, mask, palette)
+    model_name = "model.h5"
 
     # basic network hyperparameters
     backbone = 'vgg16'
     batch_size = 8
     lr = 0.0001
-    epochs = 5
+    epochs = 1
     activation = 'softmax'
     n_classes = 4
 
     # convert images to greyscale
     use_greyscale = False
+
     # image resizing
     image_scale_down = 4
     height = int(np.floor(256 / image_scale_down / 32) * 32)
     width = int(np.floor(1600 / image_scale_down / 32) * 32)
-    resize_size = (height, width) # original is (256, 1600), needs to be divisible by 32
+    resize_shape = (height, width, 1 if use_greyscale else 3) # original is (256, 1600), needs to be divisible by 32
 
-    image_shape = (resize_size[0], resize_size[1], 1 if use_greyscale else 3)
+    # test the dataset
+    train_dataset = Dataset(dataframe=train_df, images_dir=images_dir)
+    image, mask = train_dataset[5]
+    augmented = get_training_augmentation(resize_shape=resize_shape)(image=image,
+                                                                     mask=mask)
+    aug_image=augmented['image']
+    aug_mask=augmented['mask']
+
+    # show_mask(image=(image, mask),
+    #           inter_nearest=(aug_image, aug_mask))
+
+    visualize(image=image,
+              mask_1=mask[..., 0],
+              mask_2=mask[..., 1],
+              mask_3=mask[..., 2],
+              mask_4=mask[..., 3],)
+
+    visualize(aug_image=aug_image,
+              aug_mask_1=aug_mask[..., 0],
+              aug_mask_2=aug_mask[..., 1],
+              aug_mask_3=aug_mask[..., 2],
+              aug_mask_4=aug_mask[..., 3],)
 
     # create model
-    #model = sm.Unet(backbone, classes=n_classes, activation=activation)
-    model = unet(input_size=image_shape, n_classes=n_classes)
+    model = sm.Unet(backbone, classes=n_classes, activation=activation)
+    #model = unet(input_size=image_shape, n_classes=n_classes)
 
     # preprocessing
     preprocessing_input = sm.get_preprocessing(backbone)
@@ -385,7 +425,7 @@ def main():
     train_dataset = Dataset(
         dataframe=train_df,
         images_dir=images_dir,
-        augmentation=get_training_augmentation(resize_size=resize_size),
+        augmentation=get_training_augmentation(resize_shape=resize_shape),
         preprocessing=get_preprocessing(preprocessing_input),
         greyscale=use_greyscale,
     )
@@ -394,7 +434,7 @@ def main():
     val_dataset = Dataset(
         dataframe=val_df,
         images_dir=images_dir,
-        augmentation=get_validation_augmentation(resize_size=resize_size),
+        augmentation=get_validation_augmentation(resize_shape=resize_shape),
         preprocessing=get_preprocessing(preprocessing_input),
         greyscale=use_greyscale,
     )
@@ -403,7 +443,7 @@ def main():
     test_dataset = Dataset(
         dataframe=test_df,
         images_dir=images_dir,
-        augmentation=get_training_augmentation(resize_size=resize_size),
+        augmentation=get_testing_augmentation(resize_shape=resize_shape),
         preprocessing=get_preprocessing(preprocessing_input),
         greyscale=use_greyscale,
     )
@@ -414,12 +454,12 @@ def main():
     test_dataloader = Dataloader(test_dataset, batch_size=1, shuffle=False)
 
     # check shapes for errors
-    assert train_dataloader[0][0].shape == (batch_size, resize_size[0], resize_size[1], 1 if use_greyscale else 3)
-    assert val_dataloader[0][0].shape == (1, resize_size[0], resize_size[1], 1 if use_greyscale else 3)
-    assert test_dataloader[0][0].shape == (1, resize_size[0], resize_size[1], 1 if use_greyscale else 3)
-    assert train_dataloader[0][1].shape == (batch_size, resize_size[0], resize_size[1], n_classes)
-    assert val_dataloader[0][1].shape == (1, resize_size[0], resize_size[1], n_classes)
-    assert test_dataloader[0][1].shape == (1, resize_size[0], resize_size[1], n_classes)
+    assert train_dataloader[0][0].shape == (batch_size, resize_shape[0], resize_shape[1], resize_shape[2])
+    assert val_dataloader[0][0].shape == (1, resize_shape[0], resize_shape[1], resize_shape[2])
+    assert test_dataloader[0][0].shape == (1, resize_shape[0], resize_shape[1], resize_shape[2])
+    assert train_dataloader[0][1].shape == (batch_size, resize_shape[0], resize_shape[1], n_classes)
+    assert val_dataloader[0][1].shape == (1, resize_shape[0], resize_shape[1], n_classes)
+    assert test_dataloader[0][1].shape == (1, resize_shape[0], resize_shape[1], n_classes)
 
     # define callbacks
     callbacks = [
@@ -430,15 +470,48 @@ def main():
     ]
 
     # train model
-    history = model.fit(
-        train_dataloader,
-        steps_per_epoch=len(train_dataloader),
-        epochs=epochs,
-        verbose=0,
-        callbacks=callbacks,
-        validation_data=val_dataloader,
-        validation_steps=len(val_dataloader),
-    )
+    if not os.path.exists(model_name):
+        model.fit(
+            train_dataloader,
+            steps_per_epoch=len(train_dataloader),
+            epochs=epochs,
+            verbose=0,
+            callbacks=callbacks,
+            validation_data=val_dataloader,
+            validation_steps=len(val_dataloader),
+        )
+        model.save(model_name)
+    else:
+        model = keras.models.load_model(model_name,
+                                        custom_objects={"dice_loss_plus_focal_loss": total_loss,
+                                                        "iou_score": sm.metrics.IOUScore(threshold=0.5),
+                                                        "f1-score": sm.metrics.FScore(threshold=0.5)})
+
+    n = 1
+    ids = np.random.choice(np.arange(len(val_dataset)), size=n)
+
+    for i in ids:
+        image, true_mask = val_dataset[i]
+        image = np.expand_dims(image, axis=0)
+        pr_mask = model.predict(image)
+
+        image = denormalize(image.squeeze())
+        pr_mask = denormalize(pr_mask.squeeze()).astype('uint8')
+
+        visualize(image=aug_image,
+                  mask_1=true_mask[..., 0],
+                  mask_2=true_mask[..., 1],
+                  mask_3=true_mask[..., 2],
+                  mask_4=true_mask[..., 3],
+                  pred_mask_1=pr_mask[..., 0],
+                  pred_mask_2=pr_mask[..., 1],
+                  pred_mask_3=pr_mask[..., 2],
+                  pred_mask_4=pr_mask[..., 3],)
+
+        show_mask(
+            true_mask=(image, true_mask),
+            predicted_mask=(image, pr_mask),
+        )
 
 if __name__ == "__main__":
     main()
