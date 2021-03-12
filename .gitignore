@@ -2,6 +2,7 @@
 **.pyc
 /src/logs
 /src/__pycache__
+/src/plots
 
 **.h5
 **.json

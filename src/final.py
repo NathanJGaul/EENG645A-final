@@ -7,6 +7,7 @@ import math
 import cv2
 
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 import numpy as np
 import pandas as pd
 import tensorflow.keras as keras
@@ -46,13 +47,15 @@ def generate_informational_plots(file_root: str):
     for file in set(files):
         image_damage_counts[list(damage[:,0]).count(file)] += 1
 
+    print(f'Damaged: {damaged_num}, Undamaged: {not_damaged_num}, Total: {damaged_num+not_damaged_num}')
     # some insightful plots
     plt.figure()
-    plt.bar(["Damaged", "Not Damaged"], [damaged_num, not_damaged_num])
+    plt.bar(["Damaged", "Undamaged"], [damaged_num, not_damaged_num])
     plt.ylabel("Count")
-    plt.title("Damaged vs Not Damaged Count")
+    plt.title("Images Damaged vs Undamaged")
     plt.show()
 
+    print(f'Class 1: {damage_class_counts[0]}, Class 2: {damage_class_counts[1]}, Class 3: {damage_class_counts[2]}, Class 4: {damage_class_counts[3]}')
     plt.figure()
     plt.bar(['1', '2', '3', '4'], damage_class_counts)
     plt.ylabel("Count")
@@ -60,13 +63,13 @@ def generate_informational_plots(file_root: str):
     plt.title("Damage Classification Counts")
     plt.show()
 
+    print(f'0 Damage Images: {image_damage_counts[0]}, 1 Damage Images: {image_damage_counts[1]}, 2 Damage Images: {image_damage_counts[2]}, 3 Damage Images: {image_damage_counts[3]}')
     plt.figure()
     plt.bar(['0', '1', '2', '3'], image_damage_counts)
     plt.ylabel("Number of Images")
     plt.xlabel("Number of Damage Sites")
-    plt.title("Damage Site Counts")
+    plt.title("Per Image Damage Classification Counts")
     plt.show()
-
 
 def pixel_to_xy(pixel, image_size):
     (image_width, image_height) = image_size
@@ -115,8 +118,10 @@ def mask2rle(img):
 def make_mask(row_id, df):
     '''Given a row index, return image_id and mask (256, 1600, 4) from the dataframe `df`'''
     fname = df.iloc[row_id].name
-    labels = df.iloc[row_id][:4]
-    masks = np.zeros((256, 1600, 4), dtype=np.uint8) # float32 is V.Imp
+
+    num_classes = df.shape[1] - 1
+    labels = df.iloc[row_id][:num_classes]
+    masks = np.zeros((256, 1600, num_classes), dtype=np.uint8) # float32 is V.Imp
     # 4:class 1～4 (ch:0～3)
 
     for idx, label in enumerate(labels.values):
@@ -131,39 +136,66 @@ def make_mask(row_id, df):
     return fname, masks
 
 # https://www.kaggle.com/go1dfish/clear-mask-visualization-and-simple-eda
-def show_mask(**images):
+def mask_image(image, mask):
     # color pallet for defect classifications
-    palette= [(249, 192, 12), (0, 185, 241), (114, 0, 218), (249, 50, 12)]
+    palette= [(255, 174, 188), (229, 231, 160), (200, 248, 180), (198, 231, 251)]
 
-    n = len(images)
-    plt.figure(figsize=(16, 5))
-    plt.tight_layout()
+    image = np.copy(image)
+    cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    for i, (name, (image, mask)) in enumerate(images.items()):
-        for ch in range(4):
-            contours, _ = cv2.findContours(mask[:, :, ch], cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-            for j in range(0, len(contours)):
-                cv2.polylines(image, contours[j], True, palette[ch], 2)
-        plt.subplot(n, 1, i + 1)
-        plt.xticks([])
-        plt.yticks([])
-        plt.title(' '.join(name.split('_')).title())
-        plt.imshow(image)
-    plt.show()
+    num_classes = mask.shape[2]
+
+    for ch in range(num_classes):
+        contours, _ = cv2.findContours(mask[:, :, ch], cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        for j in range(0, len(contours)):
+            cv2.polylines(image, contours[j], True, palette[ch], 2)
+
+    cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return image
 
 # https://github.com/qubvel/segmentation_models/blob/master/examples/multiclass%20segmentation%20(camvid).ipynb
-def visualize(**images):
+def visualize(image, mask, pred_mask=None, name=None, save_dir=None):
     """PLot images in one row."""
-    n = len(images)
-    plt.figure(figsize=(16, 5))
-    plt.tight_layout()
-    for i, (name, image) in enumerate(images.items()):
-        plt.subplot(n, 1, i + 1)
-        plt.xticks([])
-        plt.yticks([])
-        plt.title(' '.join(name.split('_')).title())
-        plt.imshow(image)
-    plt.show()
+    num_classes = mask.shape[2]
+    if pred_mask is not None:
+        fig, axs = plt.subplots(2 + num_classes, 2)
+        gs = GridSpec(6, 2, figure=fig)
+        ax1 = fig.add_subplot(gs[0, :])
+
+        # plot configs
+        plt.setp([axs, ax1], xticks=[], yticks=[])
+        for ax0 in axs:
+            for ax in ax0:
+                ax.axis('off')
+        ax1.axis('off')
+        fig.suptitle(name)
+
+        ax1.imshow(image)
+        axs[1][0].imshow(mask_image(image, mask))
+        for ch in range(num_classes):
+            axs[ch + 2][0].imshow(mask[..., ch])
+
+        axs[1][1].imshow(mask_image(image, pred_mask))
+        for ch in range(num_classes):
+            axs[ch + 2][1].imshow(pred_mask[..., ch])
+    else:
+        fig, axs = plt.subplots(2 + num_classes, 1)
+
+        # plot configs
+        plt.setp(axs, xticks=[], yticks=[])
+        for ax in axs:
+            ax.axis('off')
+        fig.suptitle(name)
+
+        axs[0].imshow(image)
+        axs[1].imshow(mask_image(image, mask))
+        for ch in range(num_classes):
+            axs[ch + 2].imshow(mask[..., ch])
+
+    if save_dir is not None:
+        plt.savefig(os.path.join(save_dir, name))
+    else:
+        plt.show()
 
 # helper function for data visualization
 def denormalize(x):
@@ -283,8 +315,15 @@ def get_preprocessing(preprocessing_fn):
     ]
     return A.Compose(_transform)
 
-def load_dataframe_split(dataframe_path, val_size=0.2, test_size=0.2, random_state=42):
+def load_dataframe_split(dataframe_path, classes=[1, 2, 3, 4], val_size=0.2, test_size=0.2, random_state=42):
     df = pd.read_csv(dataframe_path)
+
+    # filter data by desired classes
+    df = df[df['ClassId'].isin(classes)]
+
+    # train/val/test splits
+    val_size = int(np.floor(val_size * len(df)))
+    test_size = int(np.floor(test_size * len(df)))
 
     # https://www.kaggle.com/amanooo/defect-detection-starter-u-net
     # rearrange dataframe for easier access to all defects in an image
@@ -353,73 +392,87 @@ def main():
     file_root = os.path.join("/opt", "data", "gaul_severstal_data")
     log_dir = os.path.join("./logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
     images_dir = os.path.join(file_root, "train_images")
+    plot_dir = os.path.join("./plots")
+
+    #generate_informational_plots(file_root)
+
+    # select only class 3 defect data
+    classes = [3]
+    n_classes = len(classes)
+
+    # dataset split
+    training_split = 0.6
+    validation_split = 0.2
+    testing_split = 1.0 - (training_split + validation_split)
 
     # load in damage labels
     df_path = os.path.join(file_root, "train.csv")
-    train_df, val_df, test_df = load_dataframe_split(df_path)
+    train_df, val_df, test_df = load_dataframe_split(df_path, classes=classes, val_size=validation_split, test_size=testing_split)
 
     model_name = "model.h5"
 
     # basic network hyperparameters
     backbone = 'vgg16'
-    batch_size = 8
-    lr = 0.0001
-    epochs = 1
-    activation = 'softmax'
-    n_classes = 4
+    batch_size = 1
+    lr = 1e-4
+    epochs = 10
+    activation = 'sigmoid' if n_classes is 1 else 'softmax'
+    optimizer = keras.optimizers.Adam(lr)
+    dropout = 0.1
 
     # convert images to greyscale
     use_greyscale = False
 
-    # image resizing
-    image_scale_down = 4
+    # image resizing parameters
+    image_scale_down = 5
     height = int(np.floor(256 / image_scale_down / 32) * 32)
     width = int(np.floor(1600 / image_scale_down / 32) * 32)
-    resize_shape = (height, width, 1 if use_greyscale else 3) # original is (256, 1600), needs to be divisible by 32
+    image_channels = 1 if use_greyscale else 3
+    resize_shape = (height, width, image_channels) # original is (256, 1600, 3), needs to be divisible by 32
+    mask_shape = (height, width, n_classes)
+
+    # encoder section of unet
+    encoder_weights = 'imagenet' if image_channels is 3 else None
+    encoder_freeze = False if image_channels is 3 else False
 
     # test the dataset
-    train_dataset = Dataset(dataframe=train_df, images_dir=images_dir)
+    train_dataset = Dataset(dataframe=train_df, images_dir=images_dir, greyscale=use_greyscale)
     image, mask = train_dataset[5]
-    augmented = get_training_augmentation(resize_shape=resize_shape)(image=image,
-                                                                     mask=mask)
+    augmented = get_training_augmentation(resize_shape=resize_shape)(image=image, mask=mask)
     aug_image=augmented['image']
     aug_mask=augmented['mask']
 
-    # show_mask(image=(image, mask),
-    #           inter_nearest=(aug_image, aug_mask))
-
-    visualize(image=image,
-              mask_1=mask[..., 0],
-              mask_2=mask[..., 1],
-              mask_3=mask[..., 2],
-              mask_4=mask[..., 3],)
-
-    visualize(aug_image=aug_image,
-              aug_mask_1=aug_mask[..., 0],
-              aug_mask_2=aug_mask[..., 1],
-              aug_mask_3=aug_mask[..., 2],
-              aug_mask_4=aug_mask[..., 3],)
+    # test visualization
+    test_visualize = False
+    if test_visualize:
+        visualize(image, mask)
+        visualize(aug_image, aug_mask)
+        visualize(aug_image, aug_mask, aug_mask)
 
     # create model
-    model = sm.Unet(backbone, classes=n_classes, activation=activation)
-    #model = unet(input_size=image_shape, n_classes=n_classes)
+    base_model = sm.Unet(backbone, encoder_freeze=encoder_freeze, classes=n_classes, activation=activation, encoder_weights=encoder_weights)
+    input = base_model.input
+    base_model_output = base_model.get_layer('final_conv').output
+    # add drpoout
+    base_model_output = keras.layers.Dropout(dropout)(base_model_output)
+    # add activation
+    output = keras.layers.Activation(activation, name=activation)(base_model_output)
+    model = keras.models.Model(input, output)
+    print(model.summary())
 
     # preprocessing
     preprocessing_input = sm.get_preprocessing(backbone)
 
-    # optimizer
-    optimizer = keras.optimizers.Adam(lr)
-
-    # losses
+    # loss
     dice_loss = sm.losses.DiceLoss()
-    focal_loss = sm.losses.CategoricalFocalLoss()
-    total_loss = dice_loss + focal_loss
 
     # metrics
-    metrics = [sm.metrics.IOUScore(threshold=0.5), sm.metrics.FScore(threshold=0.5)]
+    fScore = sm.metrics.FScore(threshold=0.5)
+    iouScore = sm.metrics.IOUScore(threshold=0.5)
+    metrics = [iouScore]
 
     # compile model
-    model.compile(optimizer, total_loss, metrics)
+    model.compile(optimizer, dice_loss, metrics)
 
     # Dataset for training
     train_dataset = Dataset(
@@ -464,7 +517,7 @@ def main():
     # define callbacks
     callbacks = [
         keras.callbacks.TensorBoard(log_dir=log_dir),
-        keras.callbacks.ModelCheckpoint('./src/best_model.h5', save_weights_only=True, save_best_only=True, mode='min'),
+        keras.callbacks.ModelCheckpoint('./src/best_model.h5', save_weights_only=True, save_best_only=True, mode='max'),
         keras.callbacks.ReduceLROnPlateau(),
         TqdmCallback(verbose=2),
     ]
@@ -483,35 +536,44 @@ def main():
         model.save(model_name)
     else:
         model = keras.models.load_model(model_name,
-                                        custom_objects={"dice_loss_plus_focal_loss": total_loss,
-                                                        "iou_score": sm.metrics.IOUScore(threshold=0.5),
-                                                        "f1-score": sm.metrics.FScore(threshold=0.5)})
+                                        custom_objects={"dice_loss": dice_loss,
+                                                        "iou_score": iouScore,
+                                                        "f1-score": fScore})
 
-    n = 1
-    ids = np.random.choice(np.arange(len(val_dataset)), size=n)
+    use_test = False
+    evaluate_dataset = test_dataset if use_test else val_dataset
+    evaluate_dataloader = test_dataloader if use_test else val_dataloader
 
-    for i in ids:
-        image, true_mask = val_dataset[i]
-        image = np.expand_dims(image, axis=0)
-        pr_mask = model.predict(image)
+    make_plots = False
+    if make_plots is True:
+        for i in range(len(evaluate_dataset)):
+            imageId = evaluate_dataset.ids[i]
+            image, true_mask = evaluate_dataset[i]
+            image = np.expand_dims(image, axis=0)
+            pr_mask = model.predict(image)
 
-        image = denormalize(image.squeeze())
-        pr_mask = denormalize(pr_mask.squeeze()).astype('uint8')
+            image = denormalize(image[0])
+            pr_mask = denormalize(pr_mask[0]).astype('uint8')
 
-        visualize(image=aug_image,
-                  mask_1=true_mask[..., 0],
-                  mask_2=true_mask[..., 1],
-                  mask_3=true_mask[..., 2],
-                  mask_4=true_mask[..., 3],
-                  pred_mask_1=pr_mask[..., 0],
-                  pred_mask_2=pr_mask[..., 1],
-                  pred_mask_3=pr_mask[..., 2],
-                  pred_mask_4=pr_mask[..., 3],)
+            visualize(image, true_mask, pr_mask, name=imageId, save_dir=plot_dir)
 
-        show_mask(
-            true_mask=(image, true_mask),
-            predicted_mask=(image, pr_mask),
-        )
+    # model evaluation and baseline comparison
+    evaluate_results = model.evaluate(evaluate_dataloader, batch_size=1)
+    for i, val in enumerate(evaluate_results):
+        print(f'{model.metrics_names[i]}: {val}')
+
+    # baseline is a mask covering the entire left half of the image
+    baseline_mask = np.zeros(mask_shape)
+    baseline_mask[:,:np.int(width/2),:] = 1
+    baseline_iou_scores = []
+    for i in range(len(evaluate_dataset)):
+        image, true_mask = evaluate_dataset[i]
+        image = denormalize(image)
+        iou = iouScore(true_mask.astype('float32'), baseline_mask)
+        #visualize(image, true_mask, baseline_mask.astype('uint8'))
+        baseline_iou_scores.append(iou)
+    average_baseline_iou = np.average(baseline_iou_scores)
+    print(f'baseline iou_score: {average_baseline_iou}')
 
 if __name__ == "__main__":
     main()
