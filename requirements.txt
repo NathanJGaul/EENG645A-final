@@ -16,3 +16,5 @@ tqdm
 
 segmentation-models==1.0.*
 albumentations
+ray[tune]
+hyperopt

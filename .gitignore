@@ -3,8 +3,11 @@
 /src/logs
 /src/__pycache__
 /src/plots
+/src/checkpoints
+/src/tune
 
 **.h5
 **.json
 **.csv
 **.tsv
+.~lock.*

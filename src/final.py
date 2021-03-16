@@ -24,7 +24,9 @@ from tqdm.keras import TqdmCallback
 
 import albumentations as A
 import segmentation_models as sm
-
+from ray import tune
+from ray.tune.integration.keras import TuneReportCallback
+from ray.tune.schedulers import HyperBandScheduler
 
 
 def generate_informational_plots(file_root: str):
@@ -171,10 +173,12 @@ def visualize(image, mask, pred_mask=None, name=None, save_dir=None):
         fig.suptitle(name)
 
         ax1.imshow(image)
+        axs[1][0].title.set_text("True Mask")
         axs[1][0].imshow(mask_image(image, mask))
         for ch in range(num_classes):
             axs[ch + 2][0].imshow(mask[..., ch])
 
+        axs[1][1].title.set_text("Predicted Mask")
         axs[1][1].imshow(mask_image(image, pred_mask))
         for ch in range(num_classes):
             axs[ch + 2][1].imshow(pred_mask[..., ch])
@@ -193,7 +197,7 @@ def visualize(image, mask, pred_mask=None, name=None, save_dir=None):
             axs[ch + 2].imshow(mask[..., ch])
 
     if save_dir is not None:
-        plt.savefig(os.path.join(save_dir, name))
+        plt.savefig(os.path.join(save_dir, name), dpi=300)
     else:
         plt.show()
 
@@ -339,102 +343,80 @@ def load_dataframe_split(dataframe_path, classes=[1, 2, 3, 4], val_size=0.2, tes
 
     return train_df, val_df, train_df
 
-# https://github.com/zhixuhao/unet/blob/master/model.py
-def unet(input_size, n_classes, pretrained_weights = None):
-    inputs = Input(input_size)
-    conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(inputs)
-    conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv1)
-    pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
-    conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool1)
-    conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv2)
-    pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
-    conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool2)
-    conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv3)
-    pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
-    conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool3)
-    conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv4)
-    drop4 = Dropout(0.5)(conv4)
-    pool4 = MaxPooling2D(pool_size=(2, 2))(drop4)
+def get_model(backbone,
+              encoder_freeze,
+              n_classes,
+              activation,
+              dropout):
 
-    conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool4)
-    conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv5)
-    drop5 = Dropout(0.5)(conv5)
+    base_model = sm.Unet(backend=backbone,
+                         encoder_freeze=encoder_freeze,
+                         classes=n_classes,
+                         activation=activation,
+                         encoder_weights='imagenet')
 
-    up6 = Conv2D(512, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(drop5))
-    merge6 = concatenate([drop4,up6], axis = 3)
-    conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge6)
-    conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv6)
+    # base unet
+    input = base_model.input
+    base_model_output = base_model.get_layer('final_conv').output
 
-    up7 = Conv2D(256, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv6))
-    merge7 = concatenate([conv3,up7], axis = 3)
-    conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge7)
-    conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv7)
+    # add drpoout
+    base_model_output = keras.layers.Dropout(dropout)(base_model_output)
 
-    up8 = Conv2D(128, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv7))
-    merge8 = concatenate([conv2,up8], axis = 3)
-    conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge8)
-    conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv8)
+    # add activation
+    output = keras.layers.Activation(activation, name=activation)(base_model_output)
+    model = keras.models.Model(input, output)
 
-    up9 = Conv2D(64, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv8))
-    merge9 = concatenate([conv1,up9], axis = 3)
-    conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge9)
-    conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv9)
-    conv9 = Conv2D(2, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv9)
-    conv10 = Conv2D(n_classes, 1, activation = 'softmax')(conv9)
-
-    model = Model(inputs, conv10)
     return model
 
-def main():
-    #sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(log_device_placement=True))
+def get_datasets(train_df,
+                 val_df,
+                 test_df,
+                 images_dir,
+                 resize_shape,
+                 preprocessing_input,
+                 use_greyscale):
 
-    # paths
-    file_root = os.path.join("/opt", "data", "gaul_severstal_data")
-    log_dir = os.path.join("./logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-    images_dir = os.path.join(file_root, "train_images")
-    plot_dir = os.path.join("./plots")
+    train_dataset = Dataset(
+        dataframe=train_df,
+        images_dir=images_dir,
+        augmentation=get_training_augmentation(resize_shape=resize_shape),
+        preprocessing=get_preprocessing(preprocessing_input),
+        greyscale=use_greyscale,
+    )
 
-    #generate_informational_plots(file_root)
+    val_dataset = Dataset(
+        dataframe=val_df,
+        images_dir=images_dir,
+        augmentation=get_validation_augmentation(resize_shape=resize_shape),
+        preprocessing=get_preprocessing(preprocessing_input),
+        greyscale=use_greyscale,
+    )
 
-    # select only class 3 defect data
-    classes = [3]
-    n_classes = len(classes)
+    test_dataset = Dataset(
+        dataframe=test_df,
+        images_dir=images_dir,
+        augmentation=get_testing_augmentation(resize_shape=resize_shape),
+        preprocessing=get_preprocessing(preprocessing_input),
+        greyscale=use_greyscale,
+    )
 
-    # dataset split
-    training_split = 0.6
-    validation_split = 0.2
-    testing_split = 1.0 - (training_split + validation_split)
+    return train_dataset, val_dataset, test_dataset
 
-    # load in damage labels
-    df_path = os.path.join(file_root, "train.csv")
-    train_df, val_df, test_df = load_dataframe_split(df_path, classes=classes, val_size=validation_split, test_size=testing_split)
+def get_dataloaders(train_dataset,
+                    val_dataset,
+                    test_dataset,
+                    train_batch_size):
 
-    model_name = "model.h5"
+    train_dataloader = Dataloader(train_dataset, batch_size=train_batch_size, shuffle=True)
+    val_dataloader = Dataloader(val_dataset, batch_size=1, shuffle=False)
+    test_dataloader = Dataloader(test_dataset, batch_size=1, shuffle=False)
 
-    # basic network hyperparameters
-    backbone = 'vgg16'
-    batch_size = 1
-    lr = 1e-4
-    epochs = 10
-    activation = 'sigmoid' if n_classes is 1 else 'softmax'
-    optimizer = keras.optimizers.Adam(lr)
-    dropout = 0.1
+    return train_dataloader, val_dataloader, test_dataloader
 
-    # convert images to greyscale
-    use_greyscale = False
-
-    # image resizing parameters
-    image_scale_down = 5
-    height = int(np.floor(256 / image_scale_down / 32) * 32)
-    width = int(np.floor(1600 / image_scale_down / 32) * 32)
-    image_channels = 1 if use_greyscale else 3
-    resize_shape = (height, width, image_channels) # original is (256, 1600, 3), needs to be divisible by 32
-    mask_shape = (height, width, n_classes)
-
-    # encoder section of unet
-    encoder_weights = 'imagenet' if image_channels is 3 else None
-    encoder_freeze = False if image_channels is 3 else False
-
+def dataset_test(train_df,
+                 images_dir,
+                 use_greyscale,
+                 resize_shape):
     # test the dataset
     train_dataset = Dataset(dataframe=train_df, images_dir=images_dir, greyscale=use_greyscale)
     image, mask = train_dataset[5]
@@ -449,131 +431,202 @@ def main():
         visualize(aug_image, aug_mask)
         visualize(aug_image, aug_mask, aug_mask)
 
-    # create model
-    base_model = sm.Unet(backbone, encoder_freeze=encoder_freeze, classes=n_classes, activation=activation, encoder_weights=encoder_weights)
-    input = base_model.input
-    base_model_output = base_model.get_layer('final_conv').output
-    # add drpoout
-    base_model_output = keras.layers.Dropout(dropout)(base_model_output)
-    # add activation
-    output = keras.layers.Activation(activation, name=activation)(base_model_output)
-    model = keras.models.Model(input, output)
-    print(model.summary())
+def train_unet(config, train_dataloader=None, val_dataloader=None, loss=None, metrics=None, checkpoint_dir=None):
 
-    # preprocessing
+    epochs = 50
+    batch_size = 1
+
+    model = get_model(backbone='vvg16', encoder_freeze=config["encoder_freeze"], n_classes=1,
+                      activation='sigmoid', dropout=config["dropout"])
+
+    model.compile(optimizer=config["optimizer"](config["learning_rate"]),
+                  loss=loss,
+                  metrics=metrics)
+
+    history = model.fit(
+        train_dataloader,
+        steps_per_epoch=len(train_dataloader),
+        epochs=epochs,
+        verbose=0,
+        batch_size=batch_size,
+        validation_data=val_dataloader,
+        validation_steps=len(val_dataloader),
+        callbacks=[
+            TuneReportCallback({
+                "loss": "loss",
+                "iou_score": "iou_score",
+                "val_loss": "val_loss",
+                "val_iou_score": "val_iou_score",
+            }, on="epoch_end"),
+            TqdmCallback(verbose=2),
+        ]
+    )
+
+    # save best model of the trial
+    with tune.checkpoint_dir(step=1) as checkpoint_dir:
+        checkpoint_dir = os.path.dirname(os.path.dirname(checkpoint_dir)) # go up two directories
+        score_file_path = os.path.join(checkpoint_dir, 'score')
+        score_file_exists = os.path.isfile(score_file_path)
+        new_val_iou_score = history.history['val_iou_score'][0]
+        best_model_file_path = os.path.join(checkpoint_dir, 'best_model.h5')
+
+        if score_file_exists:
+            old_val_iou_score = 0
+            with open(score_file_path) as f:
+                old_val_iou_score = float(f.read())
+            if new_val_iou_score > old_val_iou_score:
+                # we have a new best model
+                with open(score_file_path, 'w') as f:
+                    f.write(str(new_val_iou_score))
+                model.save(best_model_file_path)
+        else:
+            # first model of the trial
+            with open(score_file_path, 'w') as f:
+                f.write(str(new_val_iou_score))
+            model.save(best_model_file_path)
+
+    print(history.history.keys())
+
+def main():
+    #sess = tf.compat.v1.Session(config=tf.compat.v1.ConfigProto(log_device_placement=True))
+
+    # paths
+    file_root = os.path.join("/opt", "data", "gaul_severstal_data")
+    project_dir = os.path.join("/opt", "project")
+    log_dir = os.path.join(project_dir, "src", "logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    images_dir = os.path.join(file_root, "train_images")
+    df_path = os.path.join(file_root, "train.csv")
+    local_tune_dir = os.path.join(project_dir, "src", "tune")
+    plot_dir = os.path.join(project_dir, "src", "plots")
+
+    # dataset split
+    training_split = 0.6
+    validation_split = 0.2
+    testing_split = 1.0 - (training_split + validation_split)
+
+    # unet encoder backbone
+    backbone = 'vgg16'
+
+    # data options
+    classes = [3]
+    n_classes = len(classes)
+    use_greyscale = False
+    batch_size = 1
+
+    # load in damage labels
+    train_df, val_df, test_df = load_dataframe_split(df_path, classes=classes, val_size=validation_split, test_size=testing_split)
+
+    # image resizing parameters
+    image_scale_down = 5
+    height = int(np.floor(256 / image_scale_down / 32) * 32)
+    width = int(np.floor(1600 / image_scale_down / 32) * 32)
+    image_channels = 1 if use_greyscale else 3
+    resize_shape = (height, width, image_channels) # original is (256, 1600, 3), needs to be divisible by 32
+    mask_shape = (height, width, n_classes)
+
+    # image preprocessing
     preprocessing_input = sm.get_preprocessing(backbone)
 
     # loss
     dice_loss = sm.losses.DiceLoss()
 
     # metrics
-    fScore = sm.metrics.FScore(threshold=0.5)
-    iouScore = sm.metrics.IOUScore(threshold=0.5)
-    metrics = [iouScore]
+    iou_score = sm.metrics.IOUScore(threshold=0.5)
+    metrics = [iou_score]
 
-    # compile model
-    model.compile(optimizer, dice_loss, metrics)
+    # datasets and dataloaders
+    train_dataset, val_dataset, test_dataset = get_datasets(images_dir=images_dir,
+                                                            preprocessing_input=preprocessing_input,
+                                                            resize_shape=resize_shape,
+                                                            train_df=train_df,
+                                                            val_df=val_df,
+                                                            test_df=test_df,
+                                                            use_greyscale=use_greyscale)
+    train_dataloader, val_dataloader, test_dataloader = get_dataloaders(train_dataset=train_dataset,
+                                                                        val_dataset=val_dataset,
+                                                                        test_dataset=test_dataset,
+                                                                        train_batch_size=batch_size)
 
-    # Dataset for training
-    train_dataset = Dataset(
-        dataframe=train_df,
-        images_dir=images_dir,
-        augmentation=get_training_augmentation(resize_shape=resize_shape),
-        preprocessing=get_preprocessing(preprocessing_input),
-        greyscale=use_greyscale,
-    )
+    # tuner config
+    config = {
+        "dropout": tune.grid_search([0.1, 0.2, 0.3, 0.4, 0.5]),
+        "learning_rate": tune.grid_search([1e-5, 1e-4, 1e-3, 1e-2]),
+        "optimizer": tune.grid_search([keras.optimizers.Adam, keras.optimizers.RMSprop]),
+        "encoder_freeze": tune.grid_search([True, False]),
+    }
 
-    # Dataset for validation
-    val_dataset = Dataset(
-        dataframe=val_df,
-        images_dir=images_dir,
-        augmentation=get_validation_augmentation(resize_shape=resize_shape),
-        preprocessing=get_preprocessing(preprocessing_input),
-        greyscale=use_greyscale,
-    )
+    # best model config
+    best_config = {
+        "dropout": 0.1,
+        "learning_rate": 1e-4,
+        "optimizer": keras.optimizers.Adam,
+        "encoder_freeze": False,
+    }
 
-    # Dataset for validation
-    test_dataset = Dataset(
-        dataframe=test_df,
-        images_dir=images_dir,
-        augmentation=get_testing_augmentation(resize_shape=resize_shape),
-        preprocessing=get_preprocessing(preprocessing_input),
-        greyscale=use_greyscale,
-    )
+    use_best_config = True
+    config = best_config if use_best_config else config
 
-    # Dataloaders
-    train_dataloader = Dataloader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = Dataloader(val_dataset, batch_size=1, shuffle=False)
-    test_dataloader = Dataloader(test_dataset, batch_size=1, shuffle=False)
+    # search algorithm
+    # hyperopt = HyperOptSearch(metric="val_iou_score", mode="max")
 
-    # check shapes for errors
-    assert train_dataloader[0][0].shape == (batch_size, resize_shape[0], resize_shape[1], resize_shape[2])
-    assert val_dataloader[0][0].shape == (1, resize_shape[0], resize_shape[1], resize_shape[2])
-    assert test_dataloader[0][0].shape == (1, resize_shape[0], resize_shape[1], resize_shape[2])
-    assert train_dataloader[0][1].shape == (batch_size, resize_shape[0], resize_shape[1], n_classes)
-    assert val_dataloader[0][1].shape == (1, resize_shape[0], resize_shape[1], n_classes)
-    assert test_dataloader[0][1].shape == (1, resize_shape[0], resize_shape[1], n_classes)
+    # trial scheduler
+    hyperband = HyperBandScheduler(metric="val_iou_score", mode="max")
 
-    # define callbacks
-    callbacks = [
-        keras.callbacks.TensorBoard(log_dir=log_dir),
-        keras.callbacks.ModelCheckpoint('./src/best_model.h5', save_weights_only=True, save_best_only=True, mode='max'),
-        keras.callbacks.ReduceLROnPlateau(),
-        TqdmCallback(verbose=2),
-    ]
+    # tune model or load best_model.h5
+    tune_model = True
+    model_name = "best_model.h5"
 
-    # train model
-    if not os.path.exists(model_name):
-        model.fit(
-            train_dataloader,
-            steps_per_epoch=len(train_dataloader),
-            epochs=epochs,
-            verbose=0,
-            callbacks=callbacks,
-            validation_data=val_dataloader,
-            validation_steps=len(val_dataloader),
-        )
-        model.save(model_name)
+    if tune_model:
+        analysis = tune.run(
+            tune.with_parameters(train_unet,
+                                 train_dataloader=train_dataloader,
+                                 val_dataloader=val_dataloader,
+                                 loss=dice_loss,
+                                 metrics=metrics),
+            resources_per_trial={"gpu": 1},
+            config=config,
+            # search_alg=hyperopt,
+            scheduler=hyperband,
+            local_dir=local_tune_dir)
     else:
         model = keras.models.load_model(model_name,
                                         custom_objects={"dice_loss": dice_loss,
-                                                        "iou_score": iouScore,
-                                                        "f1-score": fScore})
+                                                        "iou_score": iou_score})
 
-    use_test = False
-    evaluate_dataset = test_dataset if use_test else val_dataset
-    evaluate_dataloader = test_dataloader if use_test else val_dataloader
+        use_test = False
+        evaluate_dataset = test_dataset if use_test else val_dataset
+        evaluate_dataloader = test_dataloader if use_test else val_dataloader
 
-    make_plots = False
-    if make_plots is True:
+        make_plots = False
+        if make_plots is True:
+            for i in range(len(evaluate_dataset)):
+                imageId = evaluate_dataset.ids[i]
+                image, true_mask = evaluate_dataset[i]
+                image = np.expand_dims(image, axis=0)
+                pr_mask = model.predict(image)
+
+                image = denormalize(image[0])
+                pr_mask = denormalize(pr_mask[0]).astype('uint8')
+
+                visualize(image, true_mask, pr_mask, name=imageId, save_dir=plot_dir)
+
+        # model evaluation and baseline comparison
+        evaluate_results = model.evaluate(evaluate_dataloader, batch_size=1)
+        for i, val in enumerate(evaluate_results):
+            print(f'{model.metrics_names[i]}: {val}')
+
+        # baseline is a mask covering the entire left half of the image
+        baseline_mask = np.zeros(mask_shape)
+        baseline_mask[:,:np.int(width/2),:] = 1
+        baseline_iou_scores = []
         for i in range(len(evaluate_dataset)):
-            imageId = evaluate_dataset.ids[i]
             image, true_mask = evaluate_dataset[i]
-            image = np.expand_dims(image, axis=0)
-            pr_mask = model.predict(image)
-
-            image = denormalize(image[0])
-            pr_mask = denormalize(pr_mask[0]).astype('uint8')
-
-            visualize(image, true_mask, pr_mask, name=imageId, save_dir=plot_dir)
-
-    # model evaluation and baseline comparison
-    evaluate_results = model.evaluate(evaluate_dataloader, batch_size=1)
-    for i, val in enumerate(evaluate_results):
-        print(f'{model.metrics_names[i]}: {val}')
-
-    # baseline is a mask covering the entire left half of the image
-    baseline_mask = np.zeros(mask_shape)
-    baseline_mask[:,:np.int(width/2),:] = 1
-    baseline_iou_scores = []
-    for i in range(len(evaluate_dataset)):
-        image, true_mask = evaluate_dataset[i]
-        image = denormalize(image)
-        iou = iouScore(true_mask.astype('float32'), baseline_mask)
-        #visualize(image, true_mask, baseline_mask.astype('uint8'))
-        baseline_iou_scores.append(iou)
-    average_baseline_iou = np.average(baseline_iou_scores)
-    print(f'baseline iou_score: {average_baseline_iou}')
+            image = denormalize(image)
+            iou = iou_score(true_mask.astype('float32'), baseline_mask)
+            #visualize(image, true_mask, baseline_mask.astype('uint8'))
+            baseline_iou_scores.append(iou)
+        average_baseline_iou = np.average(baseline_iou_scores)
+        print(f'baseline iou_score: {average_baseline_iou}')
 
 if __name__ == "__main__":
     main()
