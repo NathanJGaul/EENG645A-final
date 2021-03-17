@@ -433,7 +433,7 @@ def dataset_test(train_df,
 
 def train_unet(config, train_dataloader=None, val_dataloader=None, loss=None, metrics=None, checkpoint_dir=None):
 
-    epochs = 50
+    epochs = 15
     batch_size = 1
 
     model = get_model(backbone='vvg16', encoder_freeze=config["encoder_freeze"], n_classes=1,
@@ -593,7 +593,7 @@ def main():
                                         custom_objects={"dice_loss": dice_loss,
                                                         "iou_score": iou_score})
 
-        use_test = False
+        use_test = True
         evaluate_dataset = test_dataset if use_test else val_dataset
         evaluate_dataloader = test_dataloader if use_test else val_dataloader
 
